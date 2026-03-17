@@ -1,0 +1,14 @@
+[project]
+name = "corvus-macro-automator"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "keyboard>=0.13.5",
+    "opencv-python>=4.13.0.92",
+    "pillow>=12.1.1",
+    "pyautogui>=0.9.54",
+    "pyqt6>=6.10.2",
+    "pyside6>=6.10.2",
+]
