@@ -24,10 +24,9 @@ class EditorWindow(QWidget):
 
         # 左側工具欄（插入動作）
         toolbar = QVBoxLayout()
-        toolbar_title = QLabel("工具欄")
-        toolbar_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        toolbar_title.setStyleSheet("font-weight: bold; padding: 6px;")
-        toolbar.addWidget(toolbar_title)
+        self.toolbar_title = QLabel("工具欄")
+        self.toolbar_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        toolbar.addWidget(self.toolbar_title)
 
         btn_focus = QPushButton("視窗 Focus")
         btn_focus.clicked.connect(self.add_action_focus)
@@ -63,22 +62,24 @@ class EditorWindow(QWidget):
 
         toolbar.addStretch(1)
 
-        toolbar_widget = QWidget()
-        toolbar_widget.setLayout(toolbar)
-        toolbar_widget.setFixedWidth(160)
-        toolbar_widget.setStyleSheet("background-color: #f6f6f6; border-right: 1px solid #ddd;")
-        root.addWidget(toolbar_widget)
+        self.toolbar_widget = QWidget()
+        self.toolbar_widget.setLayout(toolbar)
+        self.toolbar_widget.setFixedWidth(160)
+        self.toolbar_widget.setObjectName("toolbar")
+        root.addWidget(self.toolbar_widget)
 
         # 右側主要編輯區
         layout = QVBoxLayout()
 
         # 檔名輸入
-        layout.addWidget(QLabel("腳本名稱 (不需副檔名):"))
+        self.lbl_name = QLabel("腳本名稱 (不需副檔名):")
+        layout.addWidget(self.lbl_name)
         self.name_input = QLineEdit()
         layout.addWidget(self.name_input)
 
         # 指令清單（可讀模式）
-        layout.addWidget(QLabel("指令內容（可讀模式）:"))
+        self.lbl_steps = QLabel("指令內容（可讀模式）:")
+        layout.addWidget(self.lbl_steps)
         self.list_steps = QListWidget()
         self.list_steps.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
         layout.addWidget(self.list_steps)
@@ -87,9 +88,10 @@ class EditorWindow(QWidget):
         btn_layout = QHBoxLayout()
         self.btn_cancel = QPushButton("取消 / 返回")
         self.btn_cancel.clicked.connect(self.on_back_callback)
+        self.btn_cancel.setObjectName("secondaryButton")
         
         self.btn_save = QPushButton("儲存腳本")
-        self.btn_save.setStyleSheet("background-color: #2ecc71; color: white; font-weight: bold;")
+        self.btn_save.setObjectName("primarySave")
         self.btn_save.clicked.connect(self.save_script)
         
         btn_layout.addWidget(self.btn_cancel)
@@ -100,6 +102,88 @@ class EditorWindow(QWidget):
         right.setLayout(layout)
         root.addWidget(right, 1)
         self.setLayout(root)
+        self.apply_theme()
+
+    def apply_theme(self):
+        """
+        依據目前 Qt 調色盤的視窗背景亮度，套用深色/淺色樣式，
+        避免在深色模式下按鈕與文字對比不足而「看不到」。
+        """
+        is_dark = False
+        try:
+            pal = self.palette()
+            window = pal.color(self.backgroundRole())
+            is_dark = window.lightness() < 128
+        except Exception:
+            is_dark = False
+
+        if is_dark:
+            self.setStyleSheet(
+                """
+                QLabel { color: #e8e8e8; }
+                QLabel#toolbarTitle { font-weight: 700; }
+                QWidget#toolbar { background-color: #232323; border-right: 1px solid #3a3a3a; }
+                QLineEdit, QListWidget {
+                    background-color: #2a2a2a;
+                    color: #f2f2f2;
+                    border: 1px solid #3a3a3a;
+                    border-radius: 6px;
+                    padding: 6px;
+                }
+                QListWidget::item:selected { background-color: #3a3a3a; }
+                QPushButton {
+                    background-color: #2f2f2f;
+                    color: #f2f2f2;
+                    border: 1px solid #444;
+                    border-radius: 6px;
+                    padding: 8px 10px;
+                }
+                QPushButton:hover { background-color: #3a3a3a; }
+                QPushButton:pressed { background-color: #2a2a2a; }
+                QPushButton:disabled { color: #888; border-color: #333; background-color: #262626; }
+                QPushButton#primarySave {
+                    background-color: #2ecc71;
+                    color: white;
+                    border: none;
+                    font-weight: 700;
+                }
+                QPushButton#primarySave:hover { background-color: #27ae60; }
+                """
+            )
+        else:
+            self.setStyleSheet(
+                """
+                QLabel { color: #222; }
+                QWidget#toolbar { background-color: #f6f6f6; border-right: 1px solid #ddd; }
+                QLineEdit, QListWidget {
+                    background-color: white;
+                    color: #111;
+                    border: 1px solid #cfcfcf;
+                    border-radius: 6px;
+                    padding: 6px;
+                }
+                QListWidget::item:selected { background-color: #e8f0ff; }
+                QPushButton {
+                    background-color: #f2f2f2;
+                    color: #111;
+                    border: 1px solid #cfcfcf;
+                    border-radius: 6px;
+                    padding: 8px 10px;
+                }
+                QPushButton:hover { background-color: #eaeaea; }
+                QPushButton:pressed { background-color: #dfdfdf; }
+                QPushButton:disabled { color: #888; background-color: #f3f3f3; }
+                QPushButton#primarySave {
+                    background-color: #2ecc71;
+                    color: white;
+                    border: none;
+                    font-weight: 700;
+                }
+                QPushButton#primarySave:hover { background-color: #27ae60; }
+                """
+            )
+
+        self.toolbar_title.setObjectName("toolbarTitle")
 
     def prepare_new(self):
         """清空介面以新增腳本"""

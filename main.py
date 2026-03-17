@@ -5,6 +5,7 @@ from pathlib import Path
 from pages import main_page, edit_page
 from macro_engin import MacroEngine
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QStackedWidget, QMessageBox)
+from PyQt6.QtGui import QPalette
 
 try:
     import keyboard  # type: ignore
@@ -40,6 +41,24 @@ class CorvusMacroAutomator(QMainWindow):
         self.worker = None
 
         self.init_hotkeys()
+        self.apply_theme_to_pages()
+
+    def apply_theme_to_pages(self):
+        """
+        依據目前 Qt 調色盤是否偏深色，讓各頁面套用一致的可視樣式。
+        主要目的：避免深色模式下按鈕/文字對比不足。
+        """
+        try:
+            pal = self.palette()
+            window = pal.color(QPalette.ColorRole.Window)
+            is_dark = window.lightness() < 128
+        except Exception:
+            is_dark = False
+
+        for page in (self.page_list, self.page_editor):
+            apply_fn = getattr(page, "apply_theme", None)
+            if callable(apply_fn):
+                apply_fn()
 
     def go_to_add(self):
         self.page_editor.prepare_new()
