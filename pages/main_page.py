@@ -6,10 +6,13 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QStackedWidget,
                              QTextEdit, QHBoxLayout, QListWidget, QMessageBox)
 
 class ScriptListWindow(QWidget):
-    def __init__(self, on_add_callback, on_edit_callback):
+    def __init__(self, on_add_callback, on_edit_callback, on_run_callback, on_stop_callback):
         super().__init__()
         self.on_add_callback = on_add_callback
         self.on_edit_callback = on_edit_callback
+        self.on_run_callback = on_run_callback
+        self.on_stop_callback = on_stop_callback
+        self.is_running = False
         
         layout = QVBoxLayout()
         
@@ -44,6 +47,8 @@ class ScriptListWindow(QWidget):
         btn_layout.addWidget(self.btn_add)
         btn_layout.addWidget(self.btn_edit)
         btn_layout.addWidget(self.btn_refresh)
+        btn_layout.addWidget(self.btn_run)
+        btn_layout.addWidget(self.btn_stop)
         layout.addLayout(btn_layout)
         
         self.setLayout(layout)
@@ -60,19 +65,19 @@ class ScriptListWindow(QWidget):
         if selected:
             self.btn_run.setEnabled(False)
             self.btn_stop.setEnabled(True)
+            self.is_running = True
             self.on_run_callback(selected.text())
+        else:
+            QMessageBox.warning(self, "提示", "請先選擇一個腳本")
 
     def handle_stop(self):
         """處理停止按鈕點擊事件"""
-        if self.is_running:
-            self.is_running = False
-            
-            self.btn_run.setEnabled(True)
-            self.btn_stop.setEnabled(False)
-            
-            print("Stop button clicked: Signal sent to terminate tasks.")
-        else:
-            print("No active task to stop.")
+        if not self.is_running:
+            return
+        self.is_running = False
+        self.btn_run.setEnabled(True)
+        self.btn_stop.setEnabled(False)
+        self.on_stop_callback()
 
     def handle_edit(self):
         selected = self.list_widget.currentItem()

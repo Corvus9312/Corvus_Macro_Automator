@@ -1,11 +1,15 @@
 import os
 import sys
 import json
-import keyboard
 from pathlib import Path
 from pages import main_page, edit_page
 from macro_engin import MacroEngine
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QStackedWidget, QMessageBox)
+
+try:
+    import keyboard  # type: ignore
+except Exception:
+    keyboard = None
 
 APP_DATA_ROOT = Path(os.environ['APPDATA']) / 'Corvus_Macro_Automator'
 SCRIPTS_DIR = APP_DATA_ROOT / 'scripts'
@@ -22,7 +26,12 @@ class CorvusMacroAutomator(QMainWindow):
         self.stack = QStackedWidget()
         self.setCentralWidget(self.stack)
 
-        self.page_list = main_page.ScriptListWindow(self.go_to_add, self.go_to_edit)
+        self.page_list = main_page.ScriptListWindow(
+            self.go_to_add,
+            self.go_to_edit,
+            self.execute_script,
+            self.stop_execution,
+        )
         self.page_editor = edit_page.EditorWindow(self.back_to_list)
 
         self.stack.addWidget(self.page_list)   # Index 0
@@ -33,12 +42,11 @@ class CorvusMacroAutomator(QMainWindow):
         self.init_hotkeys()
 
     def go_to_add(self):
-        self.page_editor.name_input.setReadOnly(False)
-        self.page_editor.name_input.clear()
+        self.page_editor.prepare_new()
         self.stack.setCurrentIndex(1)
 
     def go_to_edit(self, filename):
-        self.page_editor.load_script(filename)
+        self.page_editor.load_existing(filename)
         self.stack.setCurrentIndex(1)
 
     def back_to_list(self):
@@ -79,6 +87,9 @@ class CorvusMacroAutomator(QMainWindow):
 
     def init_hotkeys(self):
         """設定全域熱鍵 F5 與 F6"""
+        if keyboard is None:
+            self.statusBar().showMessage("未安裝 keyboard：略過全域熱鍵 (F5/F6)")
+            return
         keyboard.add_hotkey('f5', self.trigger_run_by_hotkey)
         keyboard.add_hotkey('f6', self.stop_execution)
         self.statusBar().showMessage("熱鍵已啟動: F5 執行 / F6 結束")
