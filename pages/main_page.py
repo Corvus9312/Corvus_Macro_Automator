@@ -181,10 +181,12 @@ class ScriptListWindow(QWidget):
                     border: 1px solid #3a3a3a;
                     border-radius: 6px;
                     outline: none;
+                    selection-background-color: #2d6cdf;
+                    selection-color: #ffffff;
                 }
                 QListWidget:focus { outline: none; }
                 QListWidget::item:focus { outline: none; }
-                QListWidget::item:selected { background-color: #3a3a3a; }
+                QListWidget::item:selected { background-color: #2d6cdf; color: #ffffff; }
                 QPushButton {
                     background-color: #2f2f2f;
                     color: #f2f2f2;
