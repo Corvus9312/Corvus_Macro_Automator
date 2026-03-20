@@ -1,14 +1,24 @@
 [project]
 name = "corvus-macro-automator"
 version = "0.1.0"
-description = "Add your description here"
+description = "PyQt6 按鍵精靈：錄製與播放鍵盤滑鼠巨集"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 dependencies = [
-    "keyboard>=0.13.5",
-    "opencv-python>=4.13.0.92",
-    "pillow>=12.1.1",
-    "pyautogui>=0.9.54",
-    "pyqt6>=6.10.2",
-    "pyside6>=6.10.2",
+  "PyQt6>=6.7.0",
+  "PyAutoGUI>=0.9.54",
+  "pynput>=1.7.7",
 ]
+
+[project.scripts]
+corvus-macro = "main:run"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+include = ["main.py"]
+
+[tool.uv]
+package = true
