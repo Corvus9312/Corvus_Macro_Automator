@@ -11,7 +11,7 @@ from typing import Any
 import pyautogui
 import pygetwindow as gw
 from pynput import keyboard, mouse
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QObject, Qt, pyqtSignal
 from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
@@ -639,6 +639,13 @@ class WaitTimeDialog(QDialog):
         )
 
 
+class _HotkeySignals(QObject):
+    start_record = pyqtSignal()
+    stop_record = pyqtSignal()
+    start_play = pyqtSignal()
+    stop_play = pyqtSignal()
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -649,8 +656,20 @@ class MainWindow(QMainWindow):
         self.engine = MacroEngine()
         self.current_index: int | None = None
 
+        self._hotkey_signals = _HotkeySignals()
+        self._hotkey_signals.start_record.connect(self.on_start_record)
+        self._hotkey_signals.stop_record.connect(self.on_stop_record)
+        self._hotkey_signals.start_play.connect(self.on_play_selected_macro)
+        self._hotkey_signals.stop_play.connect(self.on_stop_play)
+        self._global_hotkey_listener: keyboard.Listener | None = None
+        self._last_hotkey_ts = 0.0
+
         self._build_ui()
         self._load_store()
+
+        # 全域熱鍵：即使程式不在焦點/在背景也能錄製與停止
+        self._global_hotkey_listener = keyboard.Listener(on_press=self._on_global_key_press)
+        self._global_hotkey_listener.start()
 
     def _build_ui(self) -> None:
         self.stack = QStackedWidget()
@@ -672,6 +691,17 @@ class MainWindow(QMainWindow):
         title = QLabel("巨集清單")
         title.setStyleSheet("font-size: 20px; font-weight: bold;")
         layout.addWidget(title)
+
+        play_row = QHBoxLayout()
+        self.btn_play_main = QPushButton("開始播放")
+        self.btn_stop_play_main = QPushButton("停止播放")
+        for btn in (self.btn_play_main, self.btn_stop_play_main):
+            btn.setMinimumHeight(44)
+            btn.setStyleSheet("font-size: 16px; font-weight: bold;")
+        play_row.addWidget(self.btn_play_main)
+        play_row.addWidget(self.btn_stop_play_main)
+        play_row.addStretch()
+        layout.addLayout(play_row)
 
         self.macro_list = QListWidget()
         self.macro_list.itemDoubleClicked.connect(lambda _: self.open_selected_macro())
@@ -698,6 +728,9 @@ class MainWindow(QMainWindow):
         self.btn_delete.clicked.connect(self.delete_selected_macro)
         self.btn_import.clicked.connect(self.import_macro)
         self.btn_export.clicked.connect(self.export_macro)
+        self.btn_play_main.clicked.connect(self.on_play_selected_macro)
+        self.btn_stop_play_main.clicked.connect(self.on_stop_play)
+        self.macro_list.itemSelectionChanged.connect(self._set_editor_buttons)
 
     def _build_edit_page(self) -> None:
         layout = QVBoxLayout(self.edit_page)
@@ -771,14 +804,10 @@ class MainWindow(QMainWindow):
         control_row = QHBoxLayout()
         self.btn_record = QPushButton("開始錄製")
         self.btn_stop_record = QPushButton("停止錄製")
-        self.btn_play = QPushButton("開始播放")
-        self.btn_stop_play = QPushButton("停止播放")
         self.btn_clear = QPushButton("清空事件")
         self.btn_apply = QPushButton("儲存變更")
         control_row.addWidget(self.btn_record)
         control_row.addWidget(self.btn_stop_record)
-        control_row.addWidget(self.btn_play)
-        control_row.addWidget(self.btn_stop_play)
         control_row.addWidget(self.btn_clear)
         control_row.addWidget(self.btn_apply)
         layout.addLayout(control_row)
@@ -803,8 +832,6 @@ class MainWindow(QMainWindow):
         self.btn_back.clicked.connect(self.go_back_to_list)
         self.btn_record.clicked.connect(self.on_start_record)
         self.btn_stop_record.clicked.connect(self.on_stop_record)
-        self.btn_play.clicked.connect(self.on_play)
-        self.btn_stop_play.clicked.connect(self.on_stop_play)
         self.btn_clear.clicked.connect(self.on_clear_events)
         self.btn_apply.clicked.connect(self.apply_editor_changes)
         self.btn_focus_window.clicked.connect(self.pick_and_focus_window)
@@ -814,10 +841,7 @@ class MainWindow(QMainWindow):
         self.btn_add_text.clicked.connect(self.add_text_input_action)
         self.btn_add_hotkey.clicked.connect(self.add_hotkey_action)
 
-        self.shortcut_start_record = QShortcut(QKeySequence("F5"), self)
-        self.shortcut_start_record.activated.connect(self.on_start_record)
-        self.shortcut_stop_record = QShortcut(QKeySequence("F6"), self)
-        self.shortcut_stop_record.activated.connect(self.on_stop_record)
+        # F5/F6 改由「全域熱鍵」處理，這裡不再使用 QShortcut，避免前景/背景重複觸發
 
         self.shortcut_delete_event = QShortcut(QKeySequence("Delete"), self)
         self.shortcut_delete_event.activated.connect(self.delete_selected_event)
@@ -838,10 +862,56 @@ class MainWindow(QMainWindow):
             self.store.items = []
         self._refresh_macro_list()
 
+    def _on_global_key_press(self, k: keyboard.Key | keyboard.KeyCode) -> None:
+        if k not in (keyboard.Key.f5, keyboard.Key.f6):
+            return
+
+        now = time.perf_counter()
+        # 簡單去抖：避免按住/重複觸發造成連續 start/stop
+        if now - self._last_hotkey_ts < 0.25:
+            return
+
+        self._last_hotkey_ts = now
+        if k == keyboard.Key.f5:
+            if self.stack.currentWidget() == self.edit_page:
+                self._hotkey_signals.start_record.emit()
+            else:
+                self._hotkey_signals.start_play.emit()
+        elif k == keyboard.Key.f6:
+            if self.stack.currentWidget() == self.edit_page:
+                self._hotkey_signals.stop_record.emit()
+            else:
+                self._hotkey_signals.stop_play.emit()
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        try:
+            if self._global_hotkey_listener:
+                self._global_hotkey_listener.stop()
+        except Exception:
+            pass
+        super().closeEvent(event)
+
     def _refresh_macro_list(self) -> None:
         self.macro_list.clear()
         for item in self.store.items:
-            self.macro_list.addItem(QListWidgetItem(f"{item.name}（{len(item.events)} 筆事件）"))
+            mode_text = self._play_mode_text(item)
+            line = (
+                f"{item.name} | 延遲:{item.start_delay}s | 速度:{item.speed_percent}% | "
+                f"方式:{mode_text} | 間隔:{item.repeat_interval_ms}ms | 事件:{len(item.events)}"
+            )
+            self.macro_list.addItem(QListWidgetItem(line))
+        self._set_editor_buttons()
+
+    def _play_mode_text(self, item: MacroItem) -> str:
+        if item.play_mode == "once":
+            return "不重複"
+        if item.play_mode == "repeat_count":
+            return f"重複次數({item.repeat_count})"
+        if item.play_mode == "repeat_until":
+            return f"重複至時間({item.repeat_until_at or '-'})"
+        if item.play_mode == "until_stopped":
+            return "到手動停止"
+        return item.play_mode
 
     def _selected_macro_index(self) -> int | None:
         row = self.macro_list.currentRow()
@@ -1074,8 +1144,6 @@ class MainWindow(QMainWindow):
     def _set_editor_buttons(self) -> None:
         self.btn_record.setEnabled(not self.engine.is_recording and not self.engine.is_playing)
         self.btn_stop_record.setEnabled(self.engine.is_recording)
-        self.btn_play.setEnabled(not self.engine.is_recording and not self.engine.is_playing and bool(self.engine.events))
-        self.btn_stop_play.setEnabled(self.engine.is_playing)
         self.btn_clear.setEnabled(bool(self.engine.events) and not self.engine.is_recording and not self.engine.is_playing)
         self.btn_apply.setEnabled(not self.engine.is_recording and not self.engine.is_playing)
         editable = not self.engine.is_recording and not self.engine.is_playing
@@ -1087,6 +1155,9 @@ class MainWindow(QMainWindow):
         self.btn_add_hotkey.setEnabled(editable)
         self.btn_move_up.setEnabled(editable)
         self.btn_move_down.setEnabled(editable)
+        has_selected = self._selected_macro_index() is not None
+        self.btn_play_main.setEnabled(has_selected and not self.engine.is_recording and not self.engine.is_playing)
+        self.btn_stop_play_main.setEnabled(self.engine.is_playing)
 
     def _refresh_event_list(self) -> None:
         self.event_list.clear()
@@ -1442,20 +1513,26 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"已停止錄製，共 {len(self.engine.events)} 筆事件")
         self._refresh_event_list()
 
-    def on_play(self) -> None:
+    def on_play_selected_macro(self) -> None:
+        idx = self._selected_macro_index()
+        if idx is None:
+            QMessageBox.information(self, "提示", "請先在主畫面選擇要播放的巨集")
+            return
+        item = self.store.items[idx]
+        self.engine.set_events(item.events)
         try:
             self.engine.play_async(
-                play_mode=self._play_mode_from_index(self.play_mode_box.currentIndex()),
-                repeat_count=self.repeat_count_box.value(),
-                repeat_until_at=self.repeat_until_edit.text().strip(),
-                repeat_interval_ms=self.repeat_interval_box.value(),
-                start_delay=self.delay_box.value(),
-                speed_percent=self.speed_box.value(),
+                play_mode=item.play_mode,
+                repeat_count=item.repeat_count,
+                repeat_until_at=item.repeat_until_at,
+                repeat_interval_ms=item.repeat_interval_ms,
+                start_delay=item.start_delay,
+                speed_percent=item.speed_percent,
             )
         except RuntimeError as exc:
             QMessageBox.warning(self, "無法播放", str(exc))
             return
-        self.statusBar().showMessage(f"播放中...（{self.delay_box.value()} 秒後開始）")
+        self.statusBar().showMessage(f"播放中：{item.name}（{item.start_delay} 秒後開始）")
         self._set_editor_buttons()
 
         def _watch() -> None:
