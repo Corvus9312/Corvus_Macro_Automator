@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from collections import deque
 from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,7 +12,7 @@ from typing import Any
 import pyautogui
 import pygetwindow as gw
 from pynput import keyboard, mouse
-from PyQt6.QtCore import QObject, Qt, pyqtSignal
+from PyQt6.QtCore import QTimer, QObject, Qt, pyqtSignal
 from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
@@ -29,6 +30,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QGroupBox,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -646,6 +648,10 @@ class _HotkeySignals(QObject):
     stop_play = pyqtSignal()
 
 
+class _PlaybackSignals(QObject):
+    playback_finished = pyqtSignal(int)
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -663,6 +669,22 @@ class MainWindow(QMainWindow):
         self._hotkey_signals.stop_play.connect(self.on_stop_play)
         self._global_hotkey_listener: keyboard.Listener | None = None
         self._last_hotkey_ts = 0.0
+
+        self._playback_signals = _PlaybackSignals()
+        self._playback_signals.playback_finished.connect(self._on_playback_finished)
+
+        # 排程佇列：同一時間只允許一個巨集播放，另一個觸發會加入此佇列
+        # queue 內同時保存「要播的巨集快照」與「來源標記」（用來判斷 A->B 是否已完成）
+        self._schedule_queue: deque[tuple[MacroItem, str]] = deque()
+        self._schedule_stop_requested = False
+        self._play_token = 0
+        self._token_source_tag: dict[int, str] = {}
+
+        # 「開始排程」按鈕：先跑一次 A->B，之後才啟動計時器
+        self._schedule_bootstrap_running = False
+        self._schedule_bootstrap_remaining = 0
+        self._schedule_start_after_bootstrap = False
+        self._schedule_active = False
 
         self._build_ui()
         self._load_store()
@@ -707,6 +729,56 @@ class MainWindow(QMainWindow):
         self.macro_list.itemDoubleClicked.connect(lambda _: self.open_selected_macro())
         layout.addWidget(self.macro_list)
 
+        # 排程設定（最多三個腳本）
+        schedule_box = QGroupBox("排程設定")
+        schedule_layout = QGridLayout(schedule_box)
+
+        schedule_layout.setColumnStretch(1, 2)
+
+        self.job1_macro_combo = QComboBox()
+        self.job1_macro_combo.addItem("---請選擇---", -1)
+        self.job1_interval_min_spin = QSpinBox()
+        self.job1_interval_min_spin.setRange(1, 1000000)
+        self.job1_interval_min_spin.setValue(1)
+
+        self.job2_macro_combo = QComboBox()
+        self.job2_macro_combo.addItem("---請選擇---", -1)
+        self.job2_interval_min_spin = QSpinBox()
+        self.job2_interval_min_spin.setRange(1, 1000000)
+        self.job2_interval_min_spin.setValue(1)
+
+        self.job3_macro_combo = QComboBox()
+        self.job3_macro_combo.addItem("---請選擇---", -1)
+        self.job3_interval_min_spin = QSpinBox()
+        self.job3_interval_min_spin.setRange(1, 1000000)
+        self.job3_interval_min_spin.setValue(1)
+
+        schedule_layout.addWidget(QLabel("腳本1"), 0, 0)
+        schedule_layout.addWidget(self.job1_macro_combo, 0, 1)
+        schedule_layout.addWidget(QLabel("每隔(分鐘)"), 0, 2)
+        schedule_layout.addWidget(self.job1_interval_min_spin, 0, 3)
+
+        schedule_layout.addWidget(QLabel("腳本2"), 1, 0)
+        schedule_layout.addWidget(self.job2_macro_combo, 1, 1)
+        schedule_layout.addWidget(QLabel("每隔(分鐘)"), 1, 2)
+        schedule_layout.addWidget(self.job2_interval_min_spin, 1, 3)
+
+        schedule_layout.addWidget(QLabel("腳本3"), 2, 0)
+        schedule_layout.addWidget(self.job3_macro_combo, 2, 1)
+        schedule_layout.addWidget(QLabel("每隔(分鐘)"), 2, 2)
+        schedule_layout.addWidget(self.job3_interval_min_spin, 2, 3)
+
+        self.btn_start_schedule = QPushButton("開始排程")
+        self.btn_start_schedule.setMinimumHeight(38)
+        self.btn_start_schedule.setStyleSheet("font-size: 14px; font-weight: bold;")
+        schedule_layout.addWidget(self.btn_start_schedule, 3, 3)
+        schedule_layout.setAlignment(
+            self.btn_start_schedule,
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom,
+        )
+
+        layout.addWidget(schedule_box)
+
         row = QHBoxLayout()
         self.btn_new = QPushButton("新增巨集")
         self.btn_open = QPushButton("編輯巨集")
@@ -731,6 +803,20 @@ class MainWindow(QMainWindow):
         self.btn_play_main.clicked.connect(self.on_play_selected_macro)
         self.btn_stop_play_main.clicked.connect(self.on_stop_play)
         self.macro_list.itemSelectionChanged.connect(self._set_editor_buttons)
+
+        # 排程計時器
+        self.job1_timer = QTimer(self)
+        self.job2_timer = QTimer(self)
+        self.job3_timer = QTimer(self)
+        self.job1_timer.timeout.connect(lambda: self._on_schedule_trigger(1))
+        self.job2_timer.timeout.connect(lambda: self._on_schedule_trigger(2))
+        self.job3_timer.timeout.connect(lambda: self._on_schedule_trigger(3))
+
+        self.job1_interval_min_spin.valueChanged.connect(lambda _v: self._on_job_interval_changed(1))
+        self.job2_interval_min_spin.valueChanged.connect(lambda _v: self._on_job_interval_changed(2))
+        self.job3_interval_min_spin.valueChanged.connect(lambda _v: self._on_job_interval_changed(3))
+
+        self.btn_start_schedule.clicked.connect(self.on_start_schedule_clicked)
 
     def _build_edit_page(self) -> None:
         layout = QVBoxLayout(self.edit_page)
@@ -901,6 +987,208 @@ class MainWindow(QMainWindow):
             )
             self.macro_list.addItem(QListWidgetItem(line))
         self._set_editor_buttons()
+        self._refresh_schedule_combos()
+
+    def _refresh_schedule_combos(self) -> None:
+        placeholder_text = "---請選擇---"
+
+        def fill(combo: QComboBox) -> None:
+            prev = combo.currentText()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem(placeholder_text, -1)
+            for idx, item in enumerate(self.store.items):
+                combo.addItem(item.name, idx)
+            combo.blockSignals(False)
+
+            # 恢復先前選擇（若仍存在）；否則維持「未選擇」
+            if prev and prev != placeholder_text:
+                for i in range(combo.count()):
+                    if combo.itemText(i) == prev:
+                        combo.setCurrentIndex(i)
+                        return
+            combo.setCurrentIndex(0)
+
+        if hasattr(self, "job1_macro_combo"):
+            fill(self.job1_macro_combo)
+        if hasattr(self, "job2_macro_combo"):
+            fill(self.job2_macro_combo)
+        if hasattr(self, "job3_macro_combo"):
+            fill(self.job3_macro_combo)
+
+    def _macro_item_from_job(self, job_pos: int) -> MacroItem | None:
+        combo = getattr(self, f"job{job_pos}_macro_combo", None)
+        if not combo:
+            return None
+        # 下拉選單的 -1 代表「未選擇」
+        if combo.currentData() == -1:
+            return None
+
+        name = combo.currentText().strip()
+        if not name or name == "---請選擇---":
+            return None
+
+        for item in self.store.items:
+            if item.name == name:
+                return item
+        return None
+
+    def _on_job_interval_changed(self, _job_pos: int) -> None:
+        if self._schedule_bootstrap_running or not self._schedule_active:
+            return
+        # 任何一個腳本的 interval 變動，都用「重新啟動計時器」的方式套用最新值
+        self._start_enabled_schedule_timers()
+
+    def _on_schedule_trigger(self, job_pos: int) -> None:
+        self._enqueue_or_start_job(job_pos)
+
+    def _start_enabled_schedule_timers(self) -> None:
+        # 先停掉，避免重複 start
+        self.job1_timer.stop()
+        self.job2_timer.stop()
+        self.job3_timer.stop()
+
+        if self._schedule_bootstrap_running or not self._schedule_active:
+            return
+
+        if self._macro_item_from_job(1) is not None:
+            interval_ms = int(self.job1_interval_min_spin.value()) * 60 * 1000
+            self.job1_timer.start(interval_ms)
+        if self._macro_item_from_job(2) is not None:
+            interval_ms = int(self.job2_interval_min_spin.value()) * 60 * 1000
+            self.job2_timer.start(interval_ms)
+        if self._macro_item_from_job(3) is not None:
+            interval_ms = int(self.job3_interval_min_spin.value()) * 60 * 1000
+            self.job3_timer.start(interval_ms)
+
+    def on_start_schedule_clicked(self) -> None:
+        if self.engine.is_recording:
+            QMessageBox.information(self, "提示", "播放中無法開始排程")
+            return
+
+        # 先停計時器，確保初始化播放完成後才啟動週期
+        self.job1_timer.stop()
+        self.job2_timer.stop()
+        self.job3_timer.stop()
+
+        self._schedule_active = False
+        self._schedule_stop_requested = False
+        self._token_source_tag.clear()
+
+        self._schedule_bootstrap_running = True
+        self._schedule_start_after_bootstrap = True
+        self.btn_start_schedule.setEnabled(False)
+
+        bootstrap_pairs: list[tuple[MacroItem, str]] = []
+        # 依序：腳本1 -> 腳本2 -> 腳本3（只對有選擇的項目做初始化播放）
+        for pos in (1, 2, 3):
+            item = self._macro_item_from_job(pos)
+            if item is not None:
+                bootstrap_pairs.append((item, f"bootstrap_{pos}"))
+
+        self._schedule_bootstrap_remaining = len(bootstrap_pairs)
+
+        if self._schedule_bootstrap_remaining <= 0:
+            self._schedule_bootstrap_running = False
+            self._schedule_start_after_bootstrap = False
+            self.btn_start_schedule.setEnabled(True)
+            self._start_enabled_schedule_timers()
+            self.statusBar().showMessage("排程啟動完成（未選擇任何腳本）")
+            return
+
+        # 把 A->B 先插到佇列最前面，保證初始化順序
+        for pair in reversed(bootstrap_pairs):
+            self._schedule_queue.appendleft(pair)
+
+        # 若目前沒在播放，就立刻開始播佇列最左邊的初始化巨集
+        if not self.engine.is_playing and self._schedule_queue:
+            item0, src0 = self._schedule_queue.popleft()
+            self._start_playback_item(item0, source=src0)
+
+    def _enqueue_or_start_job(self, job_id: int) -> None:
+        if self.engine.is_recording:
+            return
+        if self._schedule_stop_requested:
+            return
+        item = self._macro_item_from_job(job_id)
+        if item is None:
+            return
+
+        if self.engine.is_playing:
+            self._schedule_queue.append((item, f"schedule_{job_id}"))
+            self.statusBar().showMessage(f"排程中：{job_id} 已加入佇列（等待上一個巨集結束）")
+            return
+
+        self._start_playback_item(item, source=f"schedule_{job_id}")
+
+    def _watch_playback_done(self, token: int) -> None:
+        while self.engine.is_playing:
+            time.sleep(0.15)
+        # 回到 GUI 執行緒
+        self._playback_signals.playback_finished.emit(token)
+
+    def _on_playback_finished(self, token: int) -> None:
+        if token != self._play_token:
+            return
+
+        self._set_editor_buttons()
+
+        if self._schedule_stop_requested:
+            self._schedule_stop_requested = False
+            self.statusBar().showMessage("已停止播放")
+            self.job1_timer.stop()
+            self.job2_timer.stop()
+            self.job3_timer.stop()
+            self._schedule_bootstrap_running = False
+            self._schedule_bootstrap_remaining = 0
+            self._schedule_start_after_bootstrap = False
+            self._schedule_active = False
+            if hasattr(self, "btn_start_schedule"):
+                self.btn_start_schedule.setEnabled(True)
+            return
+
+        # 若剛結束的是「開始排程」的 A->B 初始化播放，視需要在 B 結束後啟動計時器
+        source_tag = self._token_source_tag.get(token, "")
+        if self._schedule_bootstrap_running and source_tag in ("bootstrap_1", "bootstrap_2", "bootstrap_3"):
+            self._schedule_bootstrap_remaining -= 1
+            if self._schedule_bootstrap_remaining <= 0 and self._schedule_start_after_bootstrap:
+                self._schedule_bootstrap_running = False
+                self._schedule_start_after_bootstrap = False
+                self._schedule_active = True
+                self._start_enabled_schedule_timers()
+                if hasattr(self, "btn_start_schedule"):
+                    self.btn_start_schedule.setEnabled(True)
+                self.statusBar().showMessage("排程已啟動（週期開始）")
+
+        if self._schedule_queue:
+            next_item, next_source = self._schedule_queue.popleft()
+            self._start_playback_item(next_item, source=next_source)
+            return
+
+        self.statusBar().showMessage("播放完成")
+
+    def _start_playback_item(self, item: MacroItem, source: str) -> None:
+        if self.engine.is_recording:
+            return
+        self._schedule_stop_requested = False
+        try:
+            self.engine.set_events(item.events)
+            self._play_token += 1
+            token = self._play_token
+            self._token_source_tag[token] = source
+            self.engine.play_async(
+                play_mode=item.play_mode,
+                repeat_count=item.repeat_count,
+                repeat_until_at=item.repeat_until_at,
+                repeat_interval_ms=item.repeat_interval_ms,
+                start_delay=item.start_delay,
+                speed_percent=item.speed_percent,
+            )
+            self.statusBar().showMessage(f"播放中（{source}）：{item.name}（{item.start_delay} 秒後開始）")
+            self._set_editor_buttons()
+            threading.Thread(target=self._watch_playback_done, args=(token,), daemon=True).start()
+        except RuntimeError as exc:
+            QMessageBox.warning(self, "無法播放", str(exc))
 
     def _play_mode_text(self, item: MacroItem) -> str:
         if item.play_mode == "once":
@@ -1519,31 +1807,25 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "提示", "請先在主畫面選擇要播放的巨集")
             return
         item = self.store.items[idx]
-        self.engine.set_events(item.events)
-        try:
-            self.engine.play_async(
-                play_mode=item.play_mode,
-                repeat_count=item.repeat_count,
-                repeat_until_at=item.repeat_until_at,
-                repeat_interval_ms=item.repeat_interval_ms,
-                start_delay=item.start_delay,
-                speed_percent=item.speed_percent,
-            )
-        except RuntimeError as exc:
-            QMessageBox.warning(self, "無法播放", str(exc))
+        if self.engine.is_playing:
+            self._schedule_queue.append((item, "manual"))
+            self.statusBar().showMessage(f"手動播放：已加入佇列（等待上一個巨集結束）｜{item.name}")
             return
-        self.statusBar().showMessage(f"播放中：{item.name}（{item.start_delay} 秒後開始）")
-        self._set_editor_buttons()
-
-        def _watch() -> None:
-            while self.engine.is_playing:
-                time.sleep(0.15)
-            self.statusBar().showMessage("播放完成")
-            self._set_editor_buttons()
-
-        threading.Thread(target=_watch, daemon=True).start()
+        self._start_playback_item(item, source="manual")
 
     def on_stop_play(self) -> None:
+        # 停止後清空佇列，確保「停止」就是停止全部待執行腳本
+        self._schedule_stop_requested = True
+        self._schedule_queue.clear()
+        self.job1_timer.stop()
+        self.job2_timer.stop()
+        self.job3_timer.stop()
+        self._schedule_bootstrap_running = False
+        self._schedule_bootstrap_remaining = 0
+        self._schedule_start_after_bootstrap = False
+        self._schedule_active = False
+        if hasattr(self, "btn_start_schedule"):
+            self.btn_start_schedule.setEnabled(True)
         self.engine.stop_play()
         self.statusBar().showMessage("停止播放中...")
         self._set_editor_buttons()

@@ -721,5 +721,88 @@
         }
       }
     ]
+  },
+  {
+    "name": "點乙太",
+    "play_mode": "once",
+    "repeat_count": 1,
+    "repeat_until_at": "",
+    "repeat_interval_ms": 0,
+    "start_delay": 1,
+    "speed_percent": 100,
+    "events": [
+      {
+        "t": 0.706832800002303,
+        "etype": "mouse_click",
+        "data": {
+          "x": 846,
+          "y": 353,
+          "button": "right",
+          "pressed": true
+        }
+      },
+      {
+        "t": 0.7862326999966172,
+        "etype": "mouse_click",
+        "data": {
+          "x": 845,
+          "y": 353,
+          "button": "right",
+          "pressed": false
+        }
+      },
+      {
+        "t": 1.5285245999984909,
+        "etype": "key_press",
+        "data": {
+          "kind": "key",
+          "name": "esc"
+        }
+      },
+      {
+        "t": 1.6559531000020797,
+        "etype": "key_release",
+        "data": {
+          "kind": "key",
+          "name": "esc"
+        }
+      },
+      {
+        "t": 2.1669324999966193,
+        "etype": "mouse_click",
+        "data": {
+          "x": 852,
+          "y": 425,
+          "button": "right",
+          "pressed": true
+        }
+      },
+      {
+        "t": 2.2720006000017747,
+        "etype": "mouse_click",
+        "data": {
+          "x": 852,
+          "y": 425,
+          "button": "right",
+          "pressed": false
+        }
+      },
+      {
+        "t": 2.9675053999962984,
+        "etype": "key_press",
+        "data": {
+          "kind": "key",
+          "name": "esc"
+        }
+      },
+      {
+        "t": 3.0608848999982,
+        "etype": "key_release",
+        "data": {
+          "kind": "key",
+          "name": "esc"
+        }
+      }
+    ]
   }
 ]
