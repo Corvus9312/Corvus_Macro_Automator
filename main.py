@@ -357,8 +357,18 @@ class MacroEngine:
                 pyautogui.typewrite(str(ev.data.get("text", "")), interval=0.02)
             elif ev.etype == "hotkey":
                 keys = [str(k) for k in ev.data.get("keys", []) if str(k).strip()]
+                press_ms = int(ev.data.get("press_ms", 0) or 0)
                 if keys:
-                    pyautogui.hotkey(*keys)
+                    if press_ms <= 0:
+                        pyautogui.hotkey(*keys)
+                    else:
+                        press_sec = press_ms / 1000.0
+                        # 以 keyDown/keyUp 實作「按住時間」
+                        for k in keys:
+                            pyautogui.keyDown(k)
+                        time.sleep(press_sec)
+                        for k in reversed(keys):
+                            pyautogui.keyUp(k)
             elif ev.etype == "focus_window":
                 title = str(ev.data.get("title", "")).strip()
                 if not title:
@@ -491,7 +501,27 @@ class HotkeyCaptureDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+        self.press_time_ms_spin = QSpinBox()
+        self.press_time_ms_spin.setRange(0, 600000)
+        self.press_time_ms_spin.setValue(0)
+        self.press_time_ms_spin.setSuffix(" ms")
+        layout.addWidget(QLabel("組合鍵按住時間（ms）："))
+        layout.addWidget(self.press_time_ms_spin)
+
+        # 方向鍵常會被 QLineEdit 內部處理（移動游標），導致不會走到 QDialog.keyPressEvent
+        # 因此用 eventFilter 強制接管 KeyPress，讓方向鍵也能被偵測成組合鍵。
+        self.capture_edit.installEventFilter(self)
         self.capture_edit.setFocus()
+
+    def eventFilter(self, watched, event):  # type: ignore[override]
+        # 攔截輸入框的按鍵事件，交由本對話框的 keyPressEvent 處理
+        from PyQt6.QtCore import QEvent
+
+        if watched is self.capture_edit and event.type() == QEvent.Type.KeyPress:
+            self.keyPressEvent(event)  # type: ignore[arg-type]
+            return True
+        return super().eventFilter(watched, event)
 
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
         key = event.key()
@@ -558,6 +588,9 @@ class HotkeyCaptureDialog(QDialog):
             Qt.Key.Key_PageDown: "pagedown",
         }
         return mapping.get(key, "")
+
+    def press_time_ms(self) -> int:
+        return int(self.press_time_ms_spin.value())
 
 
 class WaitTimeDialog(QDialog):
@@ -651,14 +684,12 @@ class MainWindow(QMainWindow):
         self.btn_delete = QPushButton("刪除巨集")
         self.btn_import = QPushButton("匯入單一巨集")
         self.btn_export = QPushButton("匯出單一巨集")
-        self.btn_fixed_drag = QPushButton("執行固定拖曳巨集")
         row.addWidget(self.btn_new)
         row.addWidget(self.btn_open)
         row.addWidget(self.btn_rename)
         row.addWidget(self.btn_delete)
         row.addWidget(self.btn_import)
         row.addWidget(self.btn_export)
-        row.addWidget(self.btn_fixed_drag)
         layout.addLayout(row)
 
         self.btn_new.clicked.connect(self.create_macro)
@@ -667,7 +698,6 @@ class MainWindow(QMainWindow):
         self.btn_delete.clicked.connect(self.delete_selected_macro)
         self.btn_import.clicked.connect(self.import_macro)
         self.btn_export.clicked.connect(self.export_macro)
-        self.btn_fixed_drag.clicked.connect(self.run_fixed_drag_macro)
 
     def _build_edit_page(self) -> None:
         layout = QVBoxLayout(self.edit_page)
@@ -763,6 +793,7 @@ class MainWindow(QMainWindow):
 
         self.event_list = QListWidget()
         self.event_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.event_list.itemDoubleClicked.connect(self.edit_event_block_by_item)
         layout.addWidget(self.event_list)
 
         self.hint = QLabel("提示：錄製為全域鍵盤/滑鼠事件，播放前請切到目標視窗。")
@@ -922,13 +953,61 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "匯出失敗", str(exc))
 
     def run_fixed_drag_macro(self) -> None:
+        target_title = ""
+        try:
+            active = gw.getActiveWindow()
+            active_title = active.title if active else ""
+        except Exception:
+            active_title = ""
+
+        if "Corvus" in active_title:
+            titles = [t.strip() for t in gw.getAllTitles() if t and t.strip() and "Corvus" not in t]
+            unique_titles: list[str] = []
+            seen: set[str] = set()
+            for title in titles:
+                if title not in seen:
+                    seen.add(title)
+                    unique_titles.append(title)
+            if not unique_titles:
+                QMessageBox.warning(self, "找不到目標視窗", "請先切到遊戲視窗後再執行固定拖曳巨集。")
+                return
+            selected, ok = QInputDialog.getItem(
+                self,
+                "選擇目標視窗",
+                "請選擇要接收拖曳的視窗：",
+                unique_titles,
+                0,
+                False,
+            )
+            if not ok or not selected:
+                return
+            target_title = selected
+
         def _runner() -> None:
             try:
-                pyautogui.moveTo(1285, 495, duration=MOUSE_MOVE_DURATION_SEC)
+                start_point = {"x": 1285, "y": 495}
+                end_point = {"x": 1585, "y": 495}
+
+                if target_title:
+                    try:
+                        wins = gw.getWindowsWithTitle(target_title)
+                        if wins:
+                            target = wins[0]
+                            if getattr(target, "isMinimized", False):
+                                target.restore()
+                            target.activate()
+                    except Exception:
+                        pass
+
+                pyautogui.moveTo(start_point["x"], start_point["y"], duration=MOUSE_MOVE_DURATION_SEC)
                 time.sleep(0.5)
-                pyautogui.mouseDown(button="left")
+                # 遊戲移動視角常用：按住右鍵拖曳
+                pyautogui.mouseDown(button="right")
                 time.sleep(0.5)
-                pyautogui.mouseUp(button="left")
+                # 拖曳到 X + 300（水平移動視角）
+                pyautogui.moveTo(end_point["x"], end_point["y"], duration=MOUSE_MOVE_DURATION_SEC)
+                time.sleep(0.5)
+                pyautogui.mouseUp(button="right")
                 self.statusBar().showMessage("固定拖曳巨集執行完成")
             except Exception as exc:
                 QMessageBox.critical(self, "執行失敗", str(exc))
@@ -1085,6 +1164,9 @@ class MainWindow(QMainWindow):
             return f"輸入文字：{ev.data.get('text', '')}"
         if ev.etype == "hotkey":
             keys = ev.data.get("keys", [])
+            press_ms = int(ev.data.get("press_ms", 0) or 0)
+            if press_ms > 0:
+                return f"組合鍵：{'+'.join(str(k) for k in keys)}（按住 {press_ms} ms）"
             return f"組合鍵：{'+'.join(str(k) for k in keys)}"
         if ev.etype == "focus_window":
             return f"切換視窗焦點：{ev.data.get('title', '')}"
@@ -1111,6 +1193,149 @@ class MainWindow(QMainWindow):
         if not blocks or row >= len(blocks):
             return None
         return row
+
+    def _event_block_slice_by_row(self, row: int) -> tuple[int, int] | None:
+        blocks = getattr(self, "_event_blocks", None)
+        if not blocks or row < 0 or row >= len(blocks):
+            return None
+        return blocks[row]
+
+    def edit_event_block_by_item(self, item: QListWidgetItem) -> None:
+        if self.engine.is_recording or self.engine.is_playing:
+            return
+        row = self.event_list.row(item)
+        sl = self._event_block_slice_by_row(row)
+        if sl is None:
+            return
+        s, e = sl
+        piece = self.engine.events[s:e]
+        if not piece:
+            return
+
+        first = piece[0]
+        et = first.etype
+
+        # 鍵盤按下/放開（由錄製產生）因為 payload 格式可能不匹配，此處暫不支援直接編輯。
+        if et in {"key_press", "key_release"}:
+            QMessageBox.information(self, "提示", "此類由錄製產生的鍵盤指令目前不支援雙擊編輯。")
+            return
+
+        # 滑鼠移動
+        if et == "mouse_move":
+            dialog = MouseMoveDialog(self)
+            cur = pyautogui.position()
+            x0 = int(first.data.get("x", cur[0]))
+            y0 = int(first.data.get("y", cur[1]))
+            dialog.x_box.setValue(x0)
+            dialog.y_box.setValue(y0)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            first.data["x"] = dialog.x_box.value()
+            first.data["y"] = dialog.y_box.value()
+            self._refresh_event_list()
+            self.event_list.setCurrentRow(min(row, self.event_list.count() - 1))
+            return
+
+        # 滑鼠點擊（無座標）
+        if et == "mouse_click":
+            current_button = str(first.data.get("button", "left")).lower()
+            default_idx = 1 if current_button == "right" else 0
+            selected, ok = QInputDialog.getItem(
+                self,
+                "編輯滑鼠點擊",
+                "選擇按鍵：",
+                ["左鍵", "右鍵"],
+                default_idx,
+                False,
+            )
+            if not ok or not selected:
+                return
+            button = "right" if selected == "右鍵" else "left"
+            for ev in piece:
+                if ev.etype == "mouse_click":
+                    ev.data["button"] = button
+            # 確保合併顯示一致
+            if len(piece) >= 2 and piece[0].etype == "mouse_click" and piece[1].etype == "mouse_click":
+                piece[0].data["pressed"] = True
+                piece[1].data["pressed"] = False
+            self._refresh_event_list()
+            self.event_list.setCurrentRow(min(row, self.event_list.count() - 1))
+            return
+
+        # 鍵盤輸入（文字）
+        if et == "text_input":
+            text0 = str(first.data.get("text", ""))
+            text, ok = QInputDialog.getText(
+                self,
+                "編輯鍵盤輸入",
+                "文字：",
+                QLineEdit.EchoMode.Normal,
+                text0,
+            )
+            if not ok:
+                return
+            first.data["text"] = text
+            self._refresh_event_list()
+            self.event_list.setCurrentRow(min(row, self.event_list.count() - 1))
+            return
+
+        # 組合鍵
+        if et == "hotkey":
+            dialog = HotkeyCaptureDialog(self)
+            press_ms0 = int(first.data.get("press_ms", 0) or 0)
+            dialog.press_time_ms_spin.setValue(press_ms0)
+            # 使用者可重新按組合鍵；先把目前文字放上去方便參考
+            try:
+                keys0 = first.data.get("keys", [])
+                dialog.capture_edit.setText("+".join(str(k) for k in keys0))
+            except Exception:
+                pass
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            first.data["keys"] = dialog.keys
+            first.data["press_ms"] = dialog.press_time_ms()
+            self._refresh_event_list()
+            self.event_list.setCurrentRow(min(row, self.event_list.count() - 1))
+            return
+
+        # 等待
+        if et == "wait":
+            seconds0 = float(first.data.get("seconds", 0.0) or 0.0)
+            dialog = WaitTimeDialog(self)
+            total = max(0.0, seconds0)
+            h = int(total // 3600)
+            m = int((total % 3600) // 60)
+            s = int(total % 60)
+            ms = int(round((total - int(total)) * 1000))
+            dialog.hour_box.setValue(h)
+            dialog.minute_box.setValue(min(60, m))
+            dialog.second_box.setValue(min(60, s))
+            dialog.millisecond_box.setValue(min(999, ms))
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            first.data["seconds"] = dialog.total_seconds()
+            self._refresh_event_list()
+            self.event_list.setCurrentRow(min(row, self.event_list.count() - 1))
+            return
+
+        # 聚焦視窗（title）
+        if et == "focus_window":
+            title0 = str(first.data.get("title", ""))
+            title, ok = QInputDialog.getText(
+                self,
+                "編輯聚焦視窗",
+                "視窗標題（title）：",
+                QLineEdit.EchoMode.Normal,
+                title0,
+            )
+            if not ok:
+                return
+            first.data["title"] = title
+            self._refresh_event_list()
+            self.event_list.setCurrentRow(min(row, self.event_list.count() - 1))
+            return
+
+        QMessageBox.information(self, "提示", f"目前不支援指令類型：{et} 的雙擊編輯。")
 
     def _selected_event_block_indices(self) -> list[int]:
         if self.stack.currentWidget() != self.edit_page:
@@ -1322,9 +1547,13 @@ class MainWindow(QMainWindow):
         if not dialog.keys:
             QMessageBox.warning(self, "未偵測到按鍵", "請至少按一個按鍵")
             return
-        self._append_event("hotkey", {"keys": dialog.keys}, delta=0.1)
+        self._append_event(
+            "hotkey",
+            {"keys": dialog.keys, "press_ms": dialog.press_time_ms()},
+            delta=0.1,
+        )
         self._refresh_event_list()
-        self.statusBar().showMessage(f"已新增：組合鍵 {'+'.join(dialog.keys)}")
+        self.statusBar().showMessage(f"已新增：組合鍵 {'+'.join(dialog.keys)}（{dialog.press_time_ms()}ms）")
 
     def add_wait_action(self) -> None:
         dialog = WaitTimeDialog(self)
